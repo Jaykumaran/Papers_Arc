@@ -39,7 +39,9 @@ Therefore,
 * $w = s_k * \sqrt{a_r}$
 * $h = w_k / \sqrt{a_r}$
 
-For $a_r = 1$; $a_r = 1 \& \sqrt{s_k s_{k+1}}$  where $s_{k+1}$ is the scale of next feature map. For the last feature map i.e. s = 0.9, k = 5 here, we will use $s_{k+1}$ as 1:
+For a_r = 1  
+
+$a_r = 1 \& \sqrt{s_k s_{k+1}}$  where $s_{k+1}$ is the scale of next feature map. For the last feature map i.e. s = 0.9, k = 5 here, we will use $s_{k+1}$ as 1:
 
 Additional default boxes:
 
