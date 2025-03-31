@@ -1,9 +1,11 @@
-# Papers_Arc
+# Single Shot Detector (SSD)
 =======
 
 
 
-References: https://youtu.be/c_nEue9itwg?feature=shared
+References: 
+1. https://youtu.be/c_nEue9itwg?feature=shared
+2. https://github.com/explainingai-code/SSD-PyTorch/
 
 
 # SSD - Default Boxes or Anchor boxes
@@ -142,7 +144,7 @@ Total : **8732 default boxes**
 
 
 
-
+```
 /home/jaykumaran/Downloads/VOCtrainval_06-Nov-2007/VOCdevkit/VOC2007
 ├── Annotations
 ├── ImageSets
@@ -154,4 +156,4 @@ Total : **8732 default boxes**
 └── SegmentationObject
 
 8 directories
-
+```
