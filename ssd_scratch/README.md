@@ -1,3 +1,19 @@
+| Batch Size | Accumulation Steps | mAP  |
+|------------|--------------------|------|
+| 8          | 1                  | 0.7189 |
+| 32         | 8                  | 0.40 |
+
+
+
+
+
+
+
+
+
+
+
+
 # Single Shot Detector (SSD)
 =======
 
