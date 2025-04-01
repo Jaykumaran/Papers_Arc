@@ -1,6 +1,8 @@
 Try1:
 Configs: `lr = 0.001`
 
+TEST DATASET: 
+
 | Batch Size | Accumulation Steps | mAP  |
 |------------|--------------------|------|
 | 8          | 1                  | 0.7189 |
