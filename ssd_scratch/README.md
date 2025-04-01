@@ -1,16 +1,16 @@
-Try1:
+## Try 1:
 Configs: `lr = 0.001`
 
-TEST DATASET: 
+### TEST DATASET:
 
-| Batch Size | Accumulation Steps | mAP  |
-|------------|--------------------|------|
-| 8          | 1                  | 0.7189 | ~3GB
-| 32         | 8                  | 0.40 |  ~9600MiB / 12288MiB
-| 32         | 1                  |      |  ~9022MiB / 12288MiB
+| Batch Size | Accumulation Steps | mAP    | Mem                   |
+|------------|--------------------|--------|-----------------------|
+| 8          | 1                  | 0.7189 | ~3GB                  |
+| 32         | 8                  | 0.40   | ~9600MiB / 12288MiB   |
+| 32         | 1                  |        | ~9022MiB / 12288MiB   |
 
-Try 2:
-`lr = 0.01`
+## Try 2:
+Configs: `lr = 0.01`
 
 
 
