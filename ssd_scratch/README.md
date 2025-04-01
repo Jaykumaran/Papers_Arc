@@ -1,4 +1,4 @@
-
+Try1:
 Configs: `lr = 0.001`
 
 | Batch Size | Accumulation Steps | mAP  |
@@ -6,6 +6,9 @@ Configs: `lr = 0.001`
 | 8          | 1                  | 0.7189 |
 | 32         | 8                  | 0.40 |
 | 32         | 1                  |      |
+
+Try 2:
+`lr = 0.01`
 
 
 
