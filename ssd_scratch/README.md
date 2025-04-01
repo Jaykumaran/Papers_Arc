@@ -1,4 +1,5 @@
-lr = 0.001
+
+Configs: `lr = 0.001`
 
 | Batch Size | Accumulation Steps | mAP  |
 |------------|--------------------|------|
