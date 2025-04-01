@@ -12,7 +12,7 @@ Configs: `lr = 0.001`
 ## Try 2:
 Configs: `lr = 0.01`
 
-
+<img src = "https://github.com/Jaykumaran/Papers_Arc/blob/main/ssd_scratch/training_loss.png">
 
 
 
