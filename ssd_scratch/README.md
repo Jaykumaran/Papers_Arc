@@ -15,10 +15,10 @@ Configs: `lr = 0.001`
 ## Try 2:
 Configs: `lr = 1e-4`
 
-| Batch Size | Accumulation Steps | mAP    | Mem                   |
-|------------|--------------------|--------|-----------------------|
-| 32          | 4                  | NaN |        -          |
-| 8           | 8                  |                         |
+| Batch Size | Accumulation Steps | mAP | Mem | **loss** |
+|------------|--------------------|-----|-----|---------|
+| 32         | 4                  | -   | -   | NaN     |
+| 8          | 8                  |     |     |         |
 
 
 
