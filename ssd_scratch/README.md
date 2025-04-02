@@ -2,7 +2,7 @@
 
 
 ## Try 1:
-Configs: `lr = 0.001`
+Configs: `lr = 0.001`  ; SGD with momentum
 
 ### TEST DATASET:
 
@@ -13,7 +13,7 @@ Configs: `lr = 0.001`
 | 32         | 1                  | 0.5841 | ~9022MiB / 12288MiB   |
 
 ## Try 2:
-Configs: `lr = 1e-4`
+Configs: `lr = 1e-4`  ; SGD with momentun
 
 | Batch Size | Accumulation Steps | mAP | Mem | **loss** |
 |------------|--------------------|-----|-----|---------|
