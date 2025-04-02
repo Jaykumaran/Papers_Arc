@@ -13,7 +13,12 @@ Configs: `lr = 0.001`
 | 32         | 1                  | 0.5841 | ~9022MiB / 12288MiB   |
 
 ## Try 2:
-Configs: `lr = 0.01`
+Configs: `lr = 1e-4`
+
+| Batch Size | Accumulation Steps | mAP    | Mem                   |
+|------------|--------------------|--------|-----------------------|
+| 32          | 4                  | NaN |        -          |
+| 8           | 8                  |                         |
 
 
 
