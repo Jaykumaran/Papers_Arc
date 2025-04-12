@@ -16,7 +16,7 @@ model_params:
     [ 1., 2., 0.5 ],
     [ 1., 2., 0.5 ]
   ]
-  scales : [0.1, 0.2, 0.375, 0.55, 0.725, 0.9] #equally spaced from 0.2 t o0.9 with additionally 0.1 for conv4_3 feature map
+  scales : [0.1, 0.2, 0.375, 0.55, 0.725, 0.9] #equally spaced from 0.2 to 0.9 with additionally 0.1 for conv4_3 feature map
   iou_threshold : 0.5  # decides whether a default box is FG or BG
   low_score_threshold : 0.01 # filtering low scoring default boxes during inference
   neg_pos_ratio : 3 # How many negatives samples are selected during hard mining for every positive (FG) examples
