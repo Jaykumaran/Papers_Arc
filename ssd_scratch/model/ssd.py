@@ -242,7 +242,7 @@ class SSD(nn.Module):
             num_foreground += foreground_matched_idxs_per_image.numel()
             
             # Get foreground default boxes and their transformation predictions
-            matched_gt_boxes_per_image = targets_per_image["boxes"]   # 200 i think, from config, not sure
+            matched_gt_boxes_per_image = targets_per_image["boxes"] [foreground_matched_idxs_per_image]   # 200 i think, from config, not sure
             bbox_regression_per_image = bbox_regression_per_image[fg_idxs_per_image, :]
             target_regression  = boxes_to_transformation_targets(
                 matched_gt_boxes_per_image,
@@ -261,7 +261,7 @@ class SSD(nn.Module):
             # Then set foreground default boxes target as label
             # of assigned gt box
             gt_classes_target = torch.zeros(
-                (cls_logits_per_image.size(0), )
+                (cls_logits_per_image.size(0), ),
                 dtype = targets_per_image["labels"].dtype,
                 device = targets_per_image["labels"].device,
             )
@@ -278,6 +278,196 @@ class SSD(nn.Module):
         # Calculate classification loss for ALL default_boxes
         num_classes = cls_logits.size(-1)
         cls_loss = torch.nn.functional.cross_entropy(cls_logits.view(-1, num_classes), cls_targets.view(-1), reduction="none").view(cls_targets.size())
+        
+        # Hard Negative Mining
+        foreground_idxs = cls_targets > 0
+        # We will sample total of 3 x (number of fg default_boxes)
+        # background default_boxes
+        num_negative = self.neg_pos_ratio * foreground_idxs.sum(1, keepdim=True)
+        
+        
+        # As of now cls_loss is for ALL default_boxes
+        negative_loss = cls_loss.clone()
+        # We want to ensure that after sorting based on loss value, foreground default_boxes are never picked
+        # when choosing topK highest loss indexes
+        negative_loss[foreground_idxs] = -float("inf")
+        values, idx = negative_loss.sort(dim = 1, descending=True)
+        
+        # Fetch those indexes which have in topK(K = num_negative) losses
+        background_idxs = idx.sort(1)[1] < num_negative       
+        
+        N = max(1, num_foreground)
+        return {
+            "bbox_regression": bbox_loss.sum() / N,
+            "classification": (cls_loss[foreground_idxs].sum() + cls_loss[background_idxs].sum()) / N,
+        } 
+        
+    
+    def forward(self, x, targets = None):
+        
+        # Call everything till conv4_3 layers first
+        conv_4_3_out = self.features(x)
+        
+        # Scale conv4_3 output using learnt norm scale
+        conv_4_3_out_scaled = (self.scale_weight.view(1, -1, 1, 1) * torch.nn.functional.normalize(conv_4_3_out))
+        
+        # Call conv5_3 with non_scaled conv_3 and also call additional conv layers
+        conv_5_3_fc_out = self.conv5_3_fc(conv_4_3_out)
+        conv8_2_out = self.conv8_2(conv_5_3_fc_out)
+        conv9_2_out = self.conv9_2(conv8_2_out)
+        conv10_2_out = self.conv10_2(conv9_2_out)
+        conv11_2_out = self.conv11_2(conv10_2_out)
+        
+        # Feature maps for prediction
+        outputs = [
+            conv_4_3_out_scaled, # 38x38
+            conv_5_3_fc_out,     # 19x19
+            conv8_2_out,         # 10x10
+            conv9_2_out,         # 5x5
+            conv10_2_out,        # 3x3
+            conv11_2_out         # 1x1
+        ]
+        
+        # Classification and bbox regression for all feature maps
+        cls_logits = []
+        bbox_reg_deltas = []
+        for i, features in enumerate(outputs):
+            cls_feat_i = self.cls_heads[i][features]
+            bbox_reg_feat_i = self.bbox_reg_heads[i][features]
+            
+            # Cls output from (B, A * num_classes, H, W) to (B, HWA, num_classes)
+            N, _, H, W = cls_feat_i.shape
+            cls_feat_i = cls_feat_i.view(N, -1, self.num_classes, H, W)
+            # (B, A, num_classes, H, W)
+            cls_feat_i = cls_feat_i.permute(0, 3, 4, 1, 2)  # (B, H, W, A, num_classes)
+            cls_feat_i = cls_feat_i.reshape(N, -1, self.num_classes)
+            
+            # (B, HWA, num_classes)
+            cls_logits.append(cls_feat_i)
+            
+            # Permute bbox reg output from (B, A * 4, H, W) to (B, HWA, 4)
+            N, _, H, W = bbox_reg_feat_i.shape
+            bbox_reg_feat_i = bbox_reg_feat_i.view(N, -1, 4, H, W) # (B, A, 4, H, W)
+            bbox_reg_feat_i = bbox_reg_feat_i.permute(0, 3, 4, 1, 2) # (B, H, W, A, 4)
+            bbox_reg_feat_i = bbox_reg_feat_i.reshape(N, -1, 4) # size = (B, HWA, 4)
+            bbox_reg_deltas.append(bbox_reg_feat_i)
+            
+        
+        # Concat cls logits and bbox regression predictions for all feature maps
+        cls_logits = torch.cat(cls_logits, dim=1) # (B, 8732, num_classes)
+        bbox_reg_deltas = torch.cat(bbox_reg_deltas, dim= 1) # (B, 8732, 4)
+        
+        # Generate default_boxes for all feature maps
+        default_boxes = generate_default_boxes(outputs, self.aspect_ratios, self.scales)
+        # default_boxes -> List[Tensor of shape 8732 x 4]
+        # len(default_boxes) = batch_size
+        
+        losses = []
+        detections  =[]
+        if self.training:
+            # List to hold for each image, which default box is assigned to with gt box if any or unassigned(background)
+            matched_idxs = []
+            for default_boxes_per_image, targets_per_image in zip(default_boxes, targets):
+                
+                if targets_per_image["boxes"].numel == 0:
+                    matched_idxs.append(
+                        torch.full(
+                            (default_boxes_per_image.size(0), 1), -1,
+                            dtype = torch.int64,
+                            device = default_boxes_per_image.device
+                        )
+                    )        
+                    
+                    continue
+                iou_matrix = get_iou(targets_per_image["boxes"], default_boxes_per_image)  
+                # For each default box find best ground truth box
+                matched_vals, matches = iou_matrix.max(dim = 0) 
+                # matches -> [8732]
+                
+                # Update index of match for all default_boxes which have maximum iou with a gt box < low_threshold as -1
+                # This allows selecting foreground boxes as match_index >= 0
+                below_low_threshold = matched_vals < self.iou_threshold
+                matches[below_low_threshold] =-1
+                
+                # We want to also assign the best default box for every gt as foreground
+                # So first find the best default box for every gt
+                _, highest_quality_pred_foreach_gt = iou_matrix.max(dim = 1)
+                # Update the best matching gt index for these best default_boxes
+                # as 0, 1, 2, ...., len(gt) - 1
+                matches[highest_quality_pred_foreach_gt] = torch.arange(
+                    highest_quality_pred_foreach_gt.size(0), dtype=torch.int64,
+                    device=highest_quality_pred_foreach_gt.device
+                )
+                
+                matched_idxs.append(matches)
+                
+            losses = self.compute_loss(targets, cls_logits, bbox_reg_deltas, default_boxes, matched_idxs)
+        
+        else:
+            # For test time we do the following:
+            # 1. Convert default_boxes to boxes using predicted bbox regression deltas
+            # 2. Low score filtering
+            # 3. Pre-NMS TopK filtering
+            # 4. NMS
+            # 5. Post NMS TopK filtering
+            cls_scores = torch.nn.functional.softmax(cls_logits, dim=-1)
+            num_classes = cls_scores.size(-1)
+            
+            for bbox_deltas_i, cls_scores_i, default_boxes_i in zip(bbox_reg_deltas, cls_scores, default_boxes):
+                boxes = apply_regression_pred_to_default_boxes(bbox_deltas_i, default_boxes_i)
+                
+                # Ensure all values are between 0 and 1
+                boxes.clamp_(min = 0., max = 1.0)
+                
+                pred_boxes = []
+                pred_scores = []
+                pred_labels = []
+                # Class wise filtering
+                for label in range(1, num_classes):
+                    score = cls_scores_i[:, label]
+                    
+                    # Remove low scoring boxes of this class
+                    keep_idxs = score > self.low_score_threshold
+                    score = score[keep_idxs]
+                    box = boxes[keep_idxs]
+                    
+                    # keep only topk scoring predictions of this class
+                    score, top_k_idxs = score.topk(min(self.pre_nms_topK, len(score)))
+                    box = box[top_k_idxs]
+                    
+                    pred_boxes.append(box)
+                    pred_scores.append(score)
+                    pred_labels.append(torch.full_like(score, fill_value=label, dtype = torch.int64, device=cls_scores.device))
+            
+            pred_boxes = torch.cat(pred_boxes, dim=0)
+            pred_scores = torch.cat(pred_scores, dim=0)
+            pred_labels = torch.cat(pred_labels, dim=0)
+            
+            # Class wise NMS
+            keep_mask = torch.zeros_like(pred_scores, dtype=torch.bool)
+            for class_id in torch.unique(pred_labels):
+                curr_indices = torch.where(pred_labels == class_id)[0]
+                curr_keep_idxs = torch.ops.torchvision.nms(pred_boxes[curr_indices], pred_scores[curr_indices], self.nms_threshold)
+                
+                keep_mask[curr_indices[curr_keep_idxs]] = True
+            
+            keep_indices = torch.where(keep_mask)[0]
+            post_nms_keep_indices = keep_indices[pred_scores[keep_indices].sort(descending=True)[1]]
+            keep = post_nms_keep_indices[:self.detections_per_img]
+            pred_boxes, pred_scores, pred_labels = (pred_boxes[keep], pred_scores[keep], pred_labels[keep])
+            
+            detections.append(
+                {
+                    "boxes": pred_boxes,
+                    "scores": pred_scores,
+                    "labels": pred_labels
+                }
+            )
+            
+        return losses, detections
+                                
+                
+        
         
         
         
