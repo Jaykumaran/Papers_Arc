@@ -51,12 +51,189 @@ def get_iou(boxes1, boxes2):
     x_right = torch.min(boxes1[:, None, 2], boxes2[None, :, 2]) # (N, M)
     # x_right - x_left = [[4 - 3, 2 - 1], 
                    #      [5 - 3, 2 - 2]] = [[1, 1], [2, 0]]
-    y_bottom = torch.max(boxes1[:, None, 3], boxes2[None, :, 3]) # (N, M)
+    y_bottom = torch.min(boxes1[:, None, 3], boxes2[None, :, 3]) # (N, M)
     
     intersection_area = ((x_right - x_left).clamp(min = 0) * (y_bottom - y_top).clamp(min = 0)) # (N, M)
     
+    union = area1[:,None] + area2 - intersection_area # (N, M)
     
+    iou = intersection_area / union # (N, M)
     
+    return iou
+
+
+
+
+def boxes_to_transformation_targets(ground_truth_boxes,
+                                    default_boxes,
+                                    weights = (10., 10., 5., 5.)):
+    
+    """Method to compute targets for each default boxes. 
+       Assumes boxes are in x1y1x2y2 format.  # Pascal voc
+       We first convert boxes to cx, cy, w, h format and then compute
+       targets based on following formulation
+       target_dx = (gt_cx - default_boxes_cx) / default_boxes_w
+       target_dy = (gt_cy - default_boxes_cy) / default_boxes_y
+       target_dw = log(gt_w / default_boxes_w)
+       target_dh = log(gt_h / default_boxes_h)
+       : param ground_truth_boxes: (Tensor of shape N x 4)
+       : param default_boxes: (Tensor of shape N x 4)
+       : param weights: Tuple[float] -> (wx, wy, ww, wh)
+       : return: regression_targets: (Tensor of shape N x 4)
+    """
+    
+    # Get the center_x, center_y, w, h from x1, y1, x2, y2 for default boxes
+    widths = default_boxes[:, 2] - default_boxes[:, 0]
+    heights = default_boxes[:, 3] - default_boxes[:, 1]
+    center_x = default_boxes[:, 0] - 0.5 * widths
+    center_y = default_boxes[:, 1] + 0.5 * heights
+    
+    ## Get center_x, center_y, w, h from x1, y1, x2, y2 for gt boxes
+    gt_widths = (ground_truth_boxes[:, 2] - ground_truth_boxes[:, 0])
+    gt_heights = ground_truth_boxes[:, 3] - ground_truth_boxes[:, 1]
+    gt_center_x = ground_truth_boxes[:, 0] + 0.5  * gt_widths
+    gt_center_y = ground_truth_boxes[:, 1] + 0.5 * gt_heights
+    
+    # Use formulation to compute all targets
+    targets_dx = weights[0] * (gt_center_x - center_x) / widths
+    targets_dy = weights[1] * (gt_center_y - center_y) / heights
+    targets_dw = weights[2] * torch.log(gt_widths / widths)
+    targets_dh = weights[3] * torch.log(gt_heights / heights)
+    regression_targets = torch.stack((
+        targets_dx,
+        targets_dy,
+        targets_dw,
+        targets_dh
+    ), dim = 1)
+    
+    return regression_targets
+    
+def apply_regression_pred_to_default_boxes(box_transform_pred,
+                                           default_boxes,
+                                           weights = (10., 10., 5., 5.)):
+    """
+    Method to transform default_boxes based on transformation parameter prediction.
+    
+    Assumes boxes are in x1y1x2y2 format
+    : param box_transform_pred: (Tensor of shape N x 4)
+    : param default_boxes: (Tensor of shape N x 4)
+    : param weights: Tuple[float] -> (wx, wy, ww, wh)
+    : return pred_boxes: (Tensor of shape N x 4)
+
+    """
+    
+    # Get cx, cy, w, h from x1, y1, x2, y2
+    w = default_boxes[:, 2] - default_boxes[:, 0]
+    h = default_boxes[:, 3] - default_boxes[:, 1]
+    center_x = default_boxes[:, 0] + 0.5 * w
+    center_y = default_boxes[:, 1] + 0.5 * h
+    
+    dx = box_transform_pred[..., 0] / weights[0]
+    dy = box_transform_pred[..., 1] / weights[1]
+    dw = box_transform_pred[..., 2] / weights[2]
+    dh = box_transform_pred[..., 3] / weights[3]
+    # dh -> (num_default_boxes)
+    
+    pred_center_x = dx * w + center_x
+    pred_center_y = dy * h + center_y
+    pred_w = torch.exp(dw) * w
+    pred_h = torch.exp(dh) * h
+    # pred_center_x -> (num_default_boxes, 4)
+    
+    pred_box_x1 = pred_center_x - 0.5 * pred_w
+    pred_box_y1 = pred_center_y - 0.5 * pred_h
+    pred_box_x2 = pred_center_x + 0.5 * pred_w
+    pred_box_y2 = pred_center_y + 0.5 * pred_h
+    
+    pred_boxes = torch.stack((
+        pred_box_x1,
+        pred_box_y1,
+        pred_box_x2,
+        pred_box_y2,),
+        dim = -1
+    )
+    
+    return pred_boxes
+    
+def generate_default_boxes(feat, aspect_ratios, scales):
+    """ 
+    Method to generate default_boxes for all feature maps of the image
+    : param feat: List[(Tensor of shape B x C x Feat_H x Feat_W x W)]
+    : param aspect_ratios: List[List[float]] aspect ratios for each feature map
+    : param scales: List[float] scales for each feature map
+    : return default_boxes: List[(Tensor of shape N x 4)] default_boxes over all
+                            feature maps aggregated for each batch image
+    """ 
+    
+    # List to store default boxes for all feature maps
+    default_boxes = []
+    for k in range(len(feat)):
+        # We first add the aspect ratio 1 and scale (sqrt(scale[k]) * sqrt(scale[k+1]))
+        s_prime_k = math.sqrt(scales[k] * scales[k + 1])
+        wh_pairs = [[s_prime_k, s_prime_k]]
+
+        # Adding all possible w,h pairs according to aspect ratio of the feature map k
+        for ar in aspect_ratios[k]:
+            sq_ar = math.sqrt(ar)
+            w = scales[k] * sq_ar
+            h = scales[k] * sq_ar
+            
+            wh_pairs.extend([[w, h]])    
+        
+        feat_h, feat_w = feat[k].shape[-2:]
+        
+        # These shift will be the centre of each of the default boxes
+        shifts_x = ((torch.arange(0, feat_w) + 0.5) / feat_w).to(torch.float32)
+        shifts_y = ((torch.arange(0, feat_h) + 0.5) // feat_h).to(torch.float32)
+        shifts_x, shifts_y = torch.meshgrid(shifts_y, shifts_x, indexing="ij")
+        shifts_x = shifts_x.reshape(-1)
+        shifts_y = shifts_y.reshape(-1)
+        
+        # Duplicate these shifts for as many boxes (aspect ratios) per position we have
+        shifts = torch.stack((shifts_x, shifts_y) * len(wh_pairs), dim = -1).reshape(-1, 2)
+        # Shifts for first feature map will be (5776 x 2)
+        
+        wh_pairs = torch.as_tensor(wh_pairs)
+        # wh_pairs for first feature map will be (5776 x 2)
+        
+        # Repeat the wh pairs for all positions in feature map
+        wh_pairs = wh_pairs.repeat((feat_h * feat_w), 1)
+        
+        # Concat the shifts (cx, cy) and wh values for all positions
+        default_box = torch.cat((shifts, wh_pairs), dim = 1)
+        # default box for feat_1 -> (5776, 4)
+        # default box for feat_2 -> (2166, 4)
+        # default box for feat_3 -> (600, 4)
+        # default box for feat_4 -> (150, 4)
+        # default box for feat_5 -> (36, 4)
+        # default box for feat_6 -> (4, 4)
+        
+        default_boxes.append(default_box)
+    
+    default_boxes = torch.cat(default_boxes, dim=0)
+    # default_boxes -> (8732, 4)
+    
+    # We now duplicate these default boxes for all images in the batch and 
+    # also convert to cx, cy, w, h format of default boxes x1, y1, x2, y2
+    dboxes = []
+    for _ in range(feat[0].size(0)):
+        dboxes_in_image = default_boxes
+        # x1 = cx - 0.5 * width
+        # y1 = cy - 0.5 * height
+        # x2 = cx + 0.5 * width
+        # y2 = cy + 0.5 * height
+        dboxes_in_image = torch.cat(
+            [
+                (dboxes_in_image[:, :2] - 0.5 * dboxes_in_image[:, 2:]),
+                (dboxes_in_image[:, :2] + 0.5 * dboxes_in_image[:, 2:]),
+            ],
+            dim=-1
+        )
+        dboxes.append(dboxes_in_image.to(feat[0].device))
+
+    return dboxes        
+        
+        
     
 class SSD(nn.Module):
     
