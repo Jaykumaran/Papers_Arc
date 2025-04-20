@@ -6,17 +6,18 @@ class LayerNormalization(nn.Module):
     def __init__(self, features: int, eps: float = 10*-6) -> None:
         super().__init__()
         self.eps = eps
-        self.alpha = nn.Parameter(torch.ones(features)) # alpha and bias are learnable params
-        self.beta = nn.Parameter(torch.ones(features))
+        self.alpha = nn.Parameter(torch.ones(features)) # scale # alpha and bias are learnable params
+        self.beta = nn.Parameter(torch.ones(features)) # shift
         
     
     def forward(self, x):
          # x: (batch, seq_lem, hidden_size)
          # Keep the dimension for broadcasting
-         mean  = x.mean(dim = -1, keepdim = True) # (batch, seq_len, 1)
+         mean  = x.mean(dim = -1, keepdim = True) # (batch, seq_len, 1)  # compute μ over last (feature) dim
          # Keep the dimension for broadcasting
-         std = x.std(dim = -1, keepdim = True) # (B, seq_lem, 1)
+         std = x.std(dim = -1, keepdim = True) # (B, seq_lem, 1)  # compute σ
          # eps , negligibly small value to avoid zero div
+         # normalize then scale and shift
          return self.alpha * (x - mean) / (std + self.eps) + self.bias
      
      
@@ -32,9 +33,9 @@ class FeedForwardBlock(nn.Module):
         
     def forward(self, x):
         # (B, seq_len, d_model) -> (B, seq_lem, d_ff) -> (B,, seq_len, d_model)
-        x_out = self.linear_1(x)
-        x_out = self.dropout(x_out)
-        x_out = self.linear2(x_out)
+        x_out = self.linear_1(x)     # expand to hidden d_ff
+        x_out = self.dropout(x_out)  # regularize
+        x_out = self.linear_2(x_out)  # project_back  to d_model
         return x_out
     
 
@@ -50,7 +51,7 @@ class InputEmbeddings(nn.Module):
         # (B, seq_len) -> (B, seq_len, d_model)
         # Multiply by sqrt(d_model) to scale the embeddings according to the paper   # sqrt(d_k)
         
-        return self.embedding(x) * math.sqrt(self.d_model)
+        return self.embedding(x) * math.sqrt(self.d_model)  # √d_model to keep variance stable 
     
 
 class PositionalEncoding(nn.Module):
@@ -61,7 +62,7 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(dropout_p_value) # p
         
         
-        # Create a matrix of shape (seq_len, d_model)
+        # Create a pe matrix of shape (seq_len, d_model)
         pe = torch.zeros(seq_len, d_model)
         # Create a tensor of shape (seq_len)
         
@@ -78,11 +79,11 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term) # cos(position * (10000 **(2i / d_model))
         
         # Add a batch dimension to the positional encoding
-        pe = pe.unsqueeze(dim=0) # (1, seq_len, d_model)
+        pe = pe.unsqueeze(dim=0) # --> (1, seq_len, d_model)
         
         # Register the positional encoding as a buffer as its not a learnale param (sine | cos)
         self.register_buffer('pe', pe)     # This tensor is part of the model’s state, but don’t try to optimize it. Just keep it around, move it to the correct device, and save/load it with everything else.
-        
+        # Saved but not trained
     def forward(self, x):
         x = x + (self.pe[:, :x.shape[1], :]).requires_grad(False)  # (batch, seq_len, d_model)
         return self.dropout(x)
@@ -96,6 +97,7 @@ class ResidualConnection(nn.Module):
         self.norm = LayerNormalization(features)
     
     def forward(self, x, sublayer):
+        # residual add (x)
         return x + self.dropout(sublayer(self.norm(x)))
     
     
@@ -110,6 +112,8 @@ class MultiHeadAttentionBlock(nn.Module):
         assert d_model % h ==0, "d_model is not divisible by h"
 
         self.d_k = d_model // h # Dimension of vector seen by each head
+        
+        # Three projection or parameterized weight matrices for Q, K, V
         self.w_q = nn.Linear(d_model, d_model, bias=False)  # Wq
         self.w_k = nn.Linear(d_model, d_model, bias=False)  # Wk
         self.w_v = nn.Linear(d_model, d_model, bias=False)  # Wv
@@ -127,6 +131,7 @@ class MultiHeadAttentionBlock(nn.Module):
             # Write a very low value (indicating -inf) to the positions where mask == 0
             attention_scores.masked_fill(mask == 0, -1e9)
         
+        # attention probabilities
         attention_scores = attention_scores.softmax(dim = -1) # (B, h, seq_len, seq_len) 
         
         if dropout is not None:
@@ -137,25 +142,30 @@ class MultiHeadAttentionBlock(nn.Module):
         return (attention_scores @ value), attention_scores
     
     def forward(self, q, k, v, mask):
+        # Project inputs to Q, K, V
         query = self.w_q(q)  #(B, seq_len, d_model) -> (B, seq_len, d_model)
         key =   self.w_k(k)  # (B, seq_len, d_model) -> (B, seq_len, d_model)
         value = self.w_v(v)  # (B, seq_len, d_model) -> (B, seq_len, d_model)
         
+        # Reshape for multi head parallelization
         # (B, seq_len, d_model) -> (B, seq_len, h, d_k)  -> (B, h, seq_len, d_k)
         query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
         key   = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
         value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
         
-        # Calculate attention
+        # Calculate attention and apply mask
         x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+        # mask zeroes out invalid attention weights
         
-        # Combine em all heads
+        
+        # Combine/ Concat em all heads
         # (B, h, seq_len, d_k) -> (B, seq_len, h, d_k) -> (B, seq_len, d_model)
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
         
         # Multiply by Wo
         # (B, seq_len, d_model) -> (B, seq_len, d_model)
-        return self.w_o(x)
+        
+        return self.w_o(x) # final linear
     
 
 class EncoderBlock(nn.Module):
@@ -200,13 +210,16 @@ class DecoderBlock(nn.Module):
         self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout) for _ in range(3)])
     
     def forward(self, x, encoder_output, src_mask, tgt_mask):
+        # masked self-attentio (uses tgt_mask because its part of decoder)
         x = self.residual_connections[0](x, lambda: self.attention_block(x, x, x, tgt_mask))  # q, k, v
+        # Encoder-decodeer cross attention (uses src_mask)
         x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask)) # sublayer - cross attention block
         x = self.residual_connections[2](x, self.feed_forward_block)  # sublayer - FeedForwardBlock
         return x
     
-    
-# Will have Masked Multi Head Attention
+
+# Will have Masked Multi Head Attention only in Decoder layers
+# Prevents attending to future tokens
 class Decoder(nn.Module):
     
     def __init__(self, features:int, layers: nn.ModuleList) -> None:
@@ -228,7 +241,7 @@ class ProjectionLayer(nn.Module):
     
     def forward(self, x) -> None:
         # (B, seq_len, d_model) -> (B, seq_len, vocab_size)
-        return self.proj(x)
+        return self.proj(x) # Final linear layer to produce logits over target (tgt) vocabulary
 
 
 class Transformer(nn.Module):
@@ -247,14 +260,14 @@ class Transformer(nn.Module):
     
     def encode(self, src, src_mask):
         # (B, seq_len, d_model)
-        src = self.src_embed(src)
-        src = self.src_pos(src)
+        src = self.src_embed(src)  # tokens --> embeddings
+        src = self.src_pos(src)    # add sine/cosine pos embed
         return self.encoder(src, src_mask)
     
     def decode(self, encoder_output: torch.Tensor, src_mask: torch.Tensor,
                tgt: torch.Tensor, tgt_mask: torch.Tensor):
         # B, seq_len, d_model
-        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_embed(tgt)   # tokens --> embeddings
         tgt = self.tgt_pos(tgt)
         return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
     
@@ -309,3 +322,11 @@ def build_transformer(src_vocab_size:int, tgt_vocab_size: int, src_seq_len: int,
             nn.init.xavier_uniform_(p)
     
     return transformer
+
+
+
+
+# src_mask: prevents encoder from looking at padded positions in the source during self or cross attention
+
+# tgt_mask: 1. prevents decoder's self attention from attending to duture tokens (causal mask)
+#            2. prevents attending to padded positions
